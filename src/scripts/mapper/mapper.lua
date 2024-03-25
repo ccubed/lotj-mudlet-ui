@@ -344,8 +344,11 @@ function lotj.mapper.setup()
     loadMap(getMudletHomeDir().."/@PKGNAME@/starter-map.dat")
   end
 
+  lotj.mapper.loadShipData()
+
   lotj.setup.registerEventHandler("sysDataSendRequest", lotj.mapper.handleSentCommand)
   lotj.setup.registerEventHandler("gmcp.Room.Info", lotj.mapper.onEnterRoom)
+  lotj.setup.registerEventHandler("sysExitEvent", lotj.mapper.saveShipData)
 end
 
 function lotj.mapper.teardown()
@@ -353,11 +356,28 @@ function lotj.mapper.teardown()
   geyserMapper:hide()
 end
 
+function lotj.mapper.loadShipData()
+  local location = getMudletHomeDir() .. "/lotjmapper_ship.lua"
+  lotj.mapper.shipLastRoom = lotj.mapper.shipLastRoom or {}
+  if io.exists(location) then table.load(location, lotj.mapper.shipLastRoom) end
+end
+
+function lotj.mapper.saveShipData()
+  if lotj.mapper.shipLastRoom then
+    local location = getMudletHomeDir() .. "/lotjmapper_ship.lua"
+    table.save(location, lotj.mapper.shipLastRoom)
+  end
+end
 
 -- Track the most recent movement command so we know which direction we moved when automapping
 function lotj.mapper.handleSentCommand(event, cmd)
-  -- If we're not mapping, don't bother
+  -- If we're not mapping, store the last direction only for ships
   if lotj.mapper.mappingArea == nil then
+    if not gmcp.Room.Info.planet then
+      -- only store movement if we're actually on a ship
+      lotj.mapper.shipMovement = lotj.mapper.shipMovement or {}
+      table.insert(lotj.mapper.shipMovement, dirObj(trim(cmd)))
+    end
     return
   end
 
@@ -380,6 +400,32 @@ function lotj.mapper.popMoveDir()
   return result
 end
 
+-- Function used to handle virtual ship maps. This will process the room
+-- as a ship and attempt to position a player on an existing map of the same ship.
+function lotj.mapper.processCurrentRoomAsShip(roomData, movement)
+  local roomVnum = table.keys(roomData)[1]
+  local matchesMany = #table.keys(roomData)
+
+  if matchesMany == 1 then
+    -- Only one room matched.
+    lotj.mapper.shipLastRoom = {actual = gmcp.Room.Info.vnum, virtual = roomVnum}
+    centerview(roomVnum)
+  elseif matchesMany > 1 then
+    -- Multiple matches
+    if lotj.mapper.shipLastRoom ~= nil and lotj.mapper.shipLastRoom.actual == gmcp.Room.Info.vnum then
+      -- This is likely a reboot. The last room and the current room match.
+      centerview(lotj.mapper.shipLastRoom.virtual)
+    elseif lotj.mapper.shipLastRoom ~= nil and movement then
+      -- position based on movement
+      local nextRoom = getRoomExits(lotj.mapper.shipLastRoom.virtual)
+      if table.contains(nextRoom, movement.long) then
+        lotj.mapper.shipLastRoom = {acutal = gmcp.Room.Info.vnum, virtual = nextRoom[movement.long]}
+        centerview(lotj.mapper.shipLastRoom.virtual)
+      end
+    end
+  end
+end
+
 
 -- Function used to handle a room that we've moved into. This will use the data on
 -- lotj.mapper.current, compared with lotj.mapper.last, to potentially create a new room and
@@ -388,6 +434,25 @@ function lotj.mapper.processCurrentRoom()
   local vnum = lotj.mapper.current.vnum
   local moveDir = lotj.mapper.popMoveDir()
   local room = lotj.mapper.getRoomByVnum(vnum)
+  local searchData = searchRoom(gmcp.Room.Info.name, false, true)
+
+  -- Only virtualize ships when we aren't actively mapping
+  if not gmcp.Room.Info.planet and lotj.mapper.mappingArea == nil then
+    if room == nil then
+      -- Don't virtualize if it's actually mapped
+      if not table.is_empty(searchData) then
+        if lotj.mapper.shipMovement then
+          lotj.mapper.processCurrentRoomAsShip(searchData, table.remove(lotj.mapper.shipMovement,1))
+        else
+          lotj.mapper.processCurrentRoomAsShip(searchData, nil)
+        end
+        return
+      end
+    end
+  else
+    -- if we're not virtualizing, make sure this is empty
+    lotj.mapper.shipMovement = {}
+  end
 
   if lotj.mapper.mappingArea == nil and room == nil then
     lotj.mapper.logDebug("Room not found, but mapper not running.")
